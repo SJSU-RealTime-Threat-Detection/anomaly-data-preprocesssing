@@ -9,9 +9,8 @@ producer = KafkaProducer(
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
-log_entries = ['192.168.1.151 - - [2025-03-01T06:05:04.657701700] "GET /admin HTTP/1.1" 200 3367',
-    '192.168.1.211 - - [2025-04-01T06:09:33.874498100] "POST /student HTTP/1.1" 404 2523',
-    '192.168.1.18 - - [2025-05-01T06:09:33.874498100] "PUT /user HTTP/1.1" 500 249']
+log_entries = ['192.9.240.104 - - [07/Mar/2025:10:33:34 +0000] "DELETE /favicon.ico HTTP/1.1" 404 1309',
+    '217.195.5.3 - - [07/Mar/2025:10:56:01 +0000] "GET /search?q=\' UNION SELECT username, password FROM users-- HTTP/1.1" 500 943 "-" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" SQL Injection Attack Detected']
 
 for log in log_entries:
     future = producer.send(RAW_LOGS_TOPIC, log)  # Send each log separately

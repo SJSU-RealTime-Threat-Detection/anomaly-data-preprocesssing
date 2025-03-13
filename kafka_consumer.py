@@ -18,19 +18,26 @@ spark = SparkSession.builder \
 spark.sparkContext.setLogLevel("ERROR")
 
 
+# Define schema for logs
 log_schema = StructType([
     StructField("client_ip", StringType(), True),
     StructField("timestamp", StringType(), True),
     StructField("http_method", StringType(), True),
     StructField("url", StringType(), True),
     StructField("response_code", IntegerType(), True),
-    StructField("response_size", IntegerType(), True)
+    StructField("response_size", IntegerType(), True),
+    StructField("referrer", StringType(), True),
+    StructField("user_agent", StringType(), True),
+    StructField("extra_info", StringType(), True)
+
 ])
 
+# Read logs from Kafka
 raw_logs = spark.readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
     .option("subscribe", RAW_LOGS_TOPIC) \
+    .option("failOnDataLoss", "false") \
     .option("startingOffsets", "latest") \
     .load()
 
@@ -43,29 +50,48 @@ logs_df.writeStream \
     .start()
 
 # Log regex pattern
-LOG_PATTERN = r'(\S+) - - \[([\d\-T:.]+)\] \"(GET|POST|PUT|DELETE|HEAD) (.*?) HTTP/\d\.\d\" (\d{3}) (\d+)'
+
+LOG_PATTERN = re.compile(
+    r'(\S+) - - \[(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2} [+-]\d{4})\] '  # IP and timestamp
+    r'"(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)? ([^"]*?) HTTP/\d\.\d" '  # HTTP method and URL
+    r'(\d{3}) (\d+|-) '  # Response code and response size
+    r'"([^"]*|-)" '  # Referrer (can be "-")
+    r'"([^"]*)"'  # User-Agent
+    r'(?:\s(.+))?'  # Optional extra info (without forcing a space)
+)
 
 def parse_log(log_message):
     print(log_message)
-    log_message = log_message.strip().replace('\\"', '"')
+
+    print(f"Raw Log: {repr(log_message)}")
+
+    if log_message.startswith('"') and log_message.endswith('"'):
+        log_message = log_message[1:-1]
+
+    log_message = log_message.replace('\\"', '"')
+
     print(f"Processed Log: {repr(log_message)}")
-    match = re.match(LOG_PATTERN, log_message)
+
+    match = LOG_PATTERN.match(log_message)
     if match:
         print("Match Found")
-        return json.dumps({
+        log_dict = {
             "client_ip": match.group(1),
             "timestamp": match.group(2),
-            "http_method": match.group(3),
-            "url": match.group(4),
+            "http_method": match.group(3) if match.group(3) else "UNKNOWN",
+            "url": match.group(4) if match.group(4) else "UNKNOWN",
             "response_code": int(match.group(5)),
-            "response_size": int(match.group(6))
-        })
+            "response_size": int(match.group(6)) if match.group(6).isdigit() else 0,
+            "referrer": match.group(7) if match.group(7) and match.group(7) != "-" else "UNKNOWN",
+            "user_agent": match.group(8) if match.group(8) else "UNKNOWN",
+            "extra_info": match.group(9) if match.group(9) else "NONE"
+        }
+        return json.dumps(log_dict)
     print("Match Not Found")
     return None
 
 # Define UDF for parsing logs
-parse_udf = udf(lambda log: parse_log(log) if log else None, StringType())
-
+parse_udf = udf(parse_log, StringType())
 # Apply parsing UDF
 logs_df = logs_df.withColumn("parsed", parse_udf(col("log_entry")))
 
