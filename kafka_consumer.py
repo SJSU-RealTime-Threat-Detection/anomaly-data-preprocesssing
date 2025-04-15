@@ -1,13 +1,18 @@
+import pickle
+
 from kafka import KafkaConsumer, KafkaProducer
 import json
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, udf
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
 from pyspark.sql import Row
 import re
+
+from prediction.predict import apply_model
 from processing.preprocess import preprocess_logs
 from processing.enrich import enrich_logs
 from config.kafka_config import KAFKA_BROKER, RAW_LOGS_TOPIC, PROCESSED_LOGS_TOPIC
+from processing.transform import transform_logs
 
 # Initialize Spark Structured Streaming
 spark = SparkSession.builder \
@@ -21,7 +26,7 @@ spark.sparkContext.setLogLevel("ERROR")
 # Define schema for logs
 log_schema = StructType([
     StructField("client_ip", StringType(), True),
-    StructField("timestamp", StringType(), True),
+    StructField("timestamp", TimestampType(), True),
     StructField("http_method", StringType(), True),
     StructField("url", StringType(), True),
     StructField("response_code", IntegerType(), True),
@@ -61,20 +66,20 @@ LOG_PATTERN = re.compile(
 )
 
 def parse_log(log_message):
-    print(log_message)
+    # print(log_message)
 
-    print(f"Raw Log: {repr(log_message)}")
+    # print(f"Raw Log: {repr(log_message)}")
 
     if log_message.startswith('"') and log_message.endswith('"'):
         log_message = log_message[1:-1]
 
     log_message = log_message.replace('\\"', '"')
 
-    print(f"Processed Log: {repr(log_message)}")
+    # print(f"Processed Log: {repr(log_message)}")
 
     match = LOG_PATTERN.match(log_message)
     if match:
-        print("Match Found")
+        # print("Match Found")
         log_dict = {
             "client_ip": match.group(1),
             "timestamp": match.group(2),
@@ -97,7 +102,8 @@ logs_df = logs_df.withColumn("parsed", parse_udf(col("log_entry")))
 
 # Convert parsed JSON string to structured columns
 parsed_logs = logs_df.withColumn("parsed_struct", from_json(col("parsed"), log_schema)) \
-                     .select("parsed_struct.*")
+                     .select("parsed_struct.*") \
+                     .filter(col("parsed_struct").isNotNull())
 
 # Write parsed logs to console for debugging
 parsed_logs.writeStream \
@@ -113,8 +119,10 @@ print("Logs preprocessed!!!")
 enriched_logs = enrich_logs(preprocessed_logs)
 print("logs enriched!!!")
 
+predicted_logs = apply_model(enriched_logs)
+
 # Convert to JSON and write back to Kafka
-query = enriched_logs.selectExpr("to_json(struct(*)) AS value") \
+query = predicted_logs.selectExpr("to_json(struct(*)) AS value") \
     .writeStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
