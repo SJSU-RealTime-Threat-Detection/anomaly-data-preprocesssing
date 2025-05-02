@@ -1,12 +1,40 @@
-from pyspark.sql import Window
-from pyspark.sql.functions import udf, col, length, size, split, expr, count, avg, lag, unix_timestamp, when, lower, \
-    to_timestamp, window
-from pyspark.sql.types import StringType, IntegerType
+import re
+import urllib
+
 import geoip2.database
+from pyspark.sql import functions as F
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType, IntegerType, StructType, StructField
 
 # Load GeoIP database once
 GEOIP_DB_PATH = "/Users/poorvaagarwal/PycharmProjects/anomaly-data-preprocesssing/GeoLite2-City.mmdb"
 geo_reader = geoip2.database.Reader(GEOIP_DB_PATH)
+
+threat_schema = StructType([
+    StructField("has_sql_keyword", IntegerType(), True),
+    StructField("has_xss_keyword", IntegerType(), True),
+    StructField("has_cmd_keyword", IntegerType(), True),
+    StructField("has_encoded_char", IntegerType(), True)
+])
+
+def detect_threat_type(url):
+    if not url:
+        return {"has_sql_keyword": 0, "has_xss_keyword": 0, "has_cmd_keyword": 0, "has_encoded_char": 0}
+
+    decoded = urllib.parse.unquote_plus(url.lower())
+
+    sql_patterns = r"(select|union|insert|drop|delete|update|from|where|--|\bor\b|\band\b)"
+    xss_patterns = r"(<script>|onerror|alert\(|<img|javascript:)"
+    cmd_patterns = r"(wget|curl|nc|bash|\bsh\b|whoami|ls|cat|ping|sleep|chmod|chown|rm|cp|mv|;|&&|\|\|)"
+    encoded_patterns = r"(%27|%3c|%3e|%3b|%26|%24|%60|%7c|%22|%23|%2f|%5c|%3d)"
+
+    return {
+        "has_sql_keyword": int(bool(re.search(sql_patterns, decoded))),
+        "has_xss_keyword": int(bool(re.search(xss_patterns, decoded))),
+        "has_cmd_keyword": int(bool(re.search(cmd_patterns, decoded))),
+        "has_encoded_char": int(bool(re.search(encoded_patterns, url)))
+    }
+threat_udf = udf(detect_threat_type, threat_schema)
 
 def get_geo_location(ip):
     try:
@@ -20,32 +48,23 @@ def get_geo_location(ip):
         return f"{city}, {country}"
     except Exception as e:
         # Log the error message
-        print(f"Error: {e}")
+        # print(f"Error: {e}")
         return "Unknown"
 
 geo_udf = udf(get_geo_location, StringType())
 
 def enrich_logs(df):
-    # df.show()  # Print out the dataframe before applying enrichment
-    # df.writeStream \
-    #     .outputMode("append") \
-    #     .format("console") \
-    #     .start()
 
-    enriched_df = df.withColumn("geo_location", geo_udf(df.client_ip)) \
-        .withColumn("request_length", length(col("url"))) \
-        .withColumn("num_numeric_chars", expr("length(regexp_replace(url, '[^0-9]', ''))")) \
-        .withColumn("num_words", size(split(col("url"), "[/?&=]"))) \
-        .withColumn("has_sql_keyword",
-                    expr("CASE WHEN lower(url) RLIKE 'select|union|insert|drop|or 1=1|--|update|delete|from|where' THEN 1 ELSE 0 END")) \
-        .withColumn("has_xss_keyword",
-                    expr("CASE WHEN lower(url) RLIKE '<script>|onerror|alert\\\\(|<img|javascript:' THEN 1 ELSE 0 END")) \
-        .withColumn("has_cmd_keyword", expr(
-        "CASE WHEN lower(url) RLIKE 'wget|curl|nc|bash|\\bsh\\b|whoami|ls|cat|ping|;|&&|\\|\\|' THEN 1 ELSE 0 END")) \
-        .withColumn("has_encoded_char",
-                    expr("CASE WHEN lower(url) RLIKE '%27|%3c|%3e|%3b|%26|%24|%60|%7c|%22|%23|%2f|%5c' THEN 1 ELSE 0 END")) \
-        .withColumn("requests_in_5_min", expr("1"))
+    df_with_threat = df.withColumn("threat_features", threat_udf(F.col("url")))
 
+    enriched_df = df_with_threat \
+        .withColumn("has_sql_keyword", F.col("threat_features.has_sql_keyword")) \
+        .withColumn("has_xss_keyword", F.col("threat_features.has_xss_keyword")) \
+        .withColumn("has_cmd_keyword", F.col("threat_features.has_cmd_keyword")) \
+        .withColumn("has_encoded_char", F.col("threat_features.has_encoded_char")) \
+        .drop("threat_features")
+
+    enriched_df = enriched_df.withColumn("geo_location", geo_udf(df.client_ip))
 
     enriched_df.writeStream \
         .outputMode("append") \

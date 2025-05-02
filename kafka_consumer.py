@@ -3,11 +3,12 @@ import pickle
 from kafka import KafkaConsumer, KafkaProducer
 import json
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, udf
+from pyspark.sql.functions import col, from_json, udf, to_json, struct, collect_list
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
 from pyspark.sql import Row
 import re
 
+from log_send_llm import send_anomalous_logs_to_api
 from prediction.predict import apply_model
 from processing.preprocess import preprocess_logs
 from processing.enrich import enrich_logs
@@ -26,7 +27,7 @@ spark.sparkContext.setLogLevel("ERROR")
 # Define schema for logs
 log_schema = StructType([
     StructField("client_ip", StringType(), True),
-    StructField("timestamp", TimestampType(), True),
+    StructField("timestamp", StringType(), True),
     StructField("http_method", StringType(), True),
     StructField("url", StringType(), True),
     StructField("response_code", IntegerType(), True),
@@ -121,13 +122,32 @@ print("logs enriched!!!")
 
 predicted_logs = apply_model(enriched_logs)
 
-# Convert to JSON and write back to Kafka
-query = predicted_logs.selectExpr("to_json(struct(*)) AS value") \
-    .writeStream \
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", KAFKA_BROKER) \
-    .option("topic", PROCESSED_LOGS_TOPIC) \
-    .option("checkpointLocation", "/tmp/checkpoints") \
+predicted_logs = predicted_logs.drop("has_sql_keyword","has_xss_keyword", "has_cmd_keyword", "has_encoded_char")
+
+
+predicted_logs.writeStream \
+    .foreachBatch(send_anomalous_logs_to_api) \
+    .outputMode("append") \
     .start()
 
-query.awaitTermination()
+
+json_logs = predicted_logs.selectExpr("to_json(struct(*)) as json_value")
+final_logs = json_logs.groupBy().agg(collect_list("json_value").alias("logs"))
+
+console_query = final_logs.selectExpr("CAST(logs AS STRING)") .writeStream.outputMode("complete").format("console") \
+    .option("truncate", False) \
+    .start()
+
+# Convert to JSON and write back to Kafka
+# query = predicted_logs.selectExpr("to_json(struct(*)) AS value") \
+#     .writeStream \
+#     .format("kafka") \
+#     .option("kafka.bootstrap.servers", KAFKA_BROKER) \
+#     .option("topic", PROCESSED_LOGS_TOPIC) \
+#     .option("checkpointLocation", "/tmp/checkpoints") \
+#     .start()
+
+
+
+# query.awaitTermination()
+console_query.awaitTermination()
