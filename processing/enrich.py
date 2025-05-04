@@ -7,7 +7,7 @@ from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType, IntegerType, StructType, StructField
 
 # Load GeoIP database once
-GEOIP_DB_PATH = "/app/GeoLite2-City.mmdb"
+GEOIP_DB_PATH = "GeoLite2-City.mmdb"
 geo_reader = geoip2.database.Reader(GEOIP_DB_PATH)
 
 threat_schema = StructType([

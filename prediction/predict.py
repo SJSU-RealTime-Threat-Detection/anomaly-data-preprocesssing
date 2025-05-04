@@ -4,10 +4,10 @@ import pandas as pd
 from pyspark.sql.functions import pandas_udf
 from pyspark.sql.types import IntegerType, StructType, FloatType, StructField
 
-with open("/app/models/anomaly_detection_model.pkl", "rb") as f:
+with open("models/anomaly_detection_model.pkl", "rb") as f:
     model = pickle.load(f)
 
-with open("/app/models/anomaly_detection_http_encoder.pkl", "rb") as f:
+with open("models/anomaly_detection_http_encoder.pkl", "rb") as f:
     encoder = pickle.load(f)
 
 # Define output schema
